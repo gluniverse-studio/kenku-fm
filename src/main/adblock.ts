@@ -124,7 +124,16 @@ export function enableAdblock(session: Session) {
         callback({});
         return;
       }
-      blocker.onBeforeRequest(details, callback);
+      // `redirect=` filters answer with a redirect to a data: URL. Electron
+      // crashes the main process on those for YouTube's ad requests (Chromium
+      // refuses such redirects anyway), so block those requests instead
+      blocker.onBeforeRequest(details, (response) =>
+        callback(
+          response.redirectURL?.startsWith("data:")
+            ? { cancel: true }
+            : response
+        )
+      );
     }
   );
   session.webRequest.onHeadersReceived(
