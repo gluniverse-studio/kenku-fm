@@ -1,6 +1,6 @@
 import { promises as fs } from "fs";
 import path from "path";
-import { app, ipcMain, net, Session } from "electron";
+import { app, ipcMain, IpcMainInvokeEvent, net, Session } from "electron";
 import {
   adsAndTrackingLists,
   ElectronBlocker,
@@ -37,6 +37,33 @@ function isAppPage(url: string | undefined): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Run each of Ghostery's scriptlets in its own function scope.
+ *
+ * Every scriptlet declares its helpers (`safeSelf`, `class JSONPath`...) at the
+ * top level, and Ghostery runs them one after another in the page's global
+ * scope. There they collide: classes throw on redeclaration, and redefined
+ * helpers make the scriptlets' wrappers call each other until the stack
+ * overflows, which kept YouTube's player from ever being built. uBlock Origin
+ * wraps each scriptlet in a function for the same reason
+ */
+function withScopedScriptlets(event: IpcMainInvokeEvent): IpcMainInvokeEvent {
+  const page = event.sender;
+  const sender = {
+    insertCSS: (css: string, options?: Electron.InsertCSSOptions) =>
+      page.insertCSS(css, options),
+    // Ghostery doesn't wait on these, so a scriptlet that throws would
+    // otherwise surface as an unhandled rejection in the main process
+    executeJavaScript: (code: string, userGesture?: boolean) =>
+      page
+        .executeJavaScript(`(function () {\n${code}\n;})();`, userGesture)
+        .catch((err) => {
+          console.warn("Adblock scriptlet failed on", page.getURL(), err);
+        }),
+  };
+  return Object.assign(Object.create(event), { sender });
 }
 
 function cachePath() {
@@ -163,7 +190,11 @@ export function enableAdblock(session: Session) {
         return;
       }
       const loaded = blocker ?? (await loading);
-      return loaded?.onInjectCosmeticFilters(event, url, msg);
+      return loaded?.onInjectCosmeticFilters(
+        withScopedScriptlets(event),
+        url,
+        msg
+      );
     }
   );
   ipcMain.handle(
