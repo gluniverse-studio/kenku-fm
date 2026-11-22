@@ -137,8 +137,9 @@ class FakeAudioParam {
 }
 
 class FakeNode {
-  constructor(type) {
+  constructor(type, context) {
     this.type = type;
+    this.context = context;
     this.connections = [];
     this.disconnected = false;
   }
@@ -166,14 +167,14 @@ class FakeAudioContext {
   }
 
   createGain() {
-    const node = new FakeNode("gain");
+    const node = new FakeNode("gain", this);
     node.gain = new FakeAudioParam(1);
     this.createdNodes.push(node);
     return node;
   }
 
   createAnalyser() {
-    const node = new FakeNode("analyser");
+    const node = new FakeNode("analyser", this);
     node.fftSize = 256;
     node.sampleValue = 0.42;
     node.getFloatTimeDomainData = (arr) => {
@@ -184,14 +185,14 @@ class FakeAudioContext {
   }
 
   createMediaStreamDestination() {
-    const node = new FakeNode("destination");
+    const node = new FakeNode("destination", this);
     node.stream = { id: `stream-${this.createdNodes.length}` };
     this.createdNodes.push(node);
     return node;
   }
 
   createMediaElementSource(element) {
-    const node = new FakeNode("element-source");
+    const node = new FakeNode("element-source", this);
     node.element = element;
     this.createdNodes.push(node);
     return node;
@@ -209,7 +210,7 @@ class FakeAudioContext {
 }
 FakeAudioContext.instances = [];
 
-test("PreviewManager authorizes only the registered player main frame and resolves local media URLs safely", () => {
+test("PreviewManager authorizes only registered player main frame, refuses remote URLs, and stops on lifecycle changes", () => {
   const ipcMain = new EventEmitter();
   const sentToPlayer = [];
   const captureCalls = [];
@@ -225,12 +226,12 @@ test("PreviewManager authorizes only the registered player main frame and resolv
 
   const playerMainFrame = { id: "main-frame" };
   const playerSubFrame = { id: "sub-frame" };
-  const playerView = {
-    id: 42,
-    mainFrame: playerMainFrame,
-    isDestroyed: () => false,
-    send: (channel, payload) => sentToPlayer.push([channel, payload]),
-  };
+  const playerView = new EventEmitter();
+  playerView.id = 42;
+  playerView.mainFrame = playerMainFrame;
+  playerView.isDestroyed = () => false;
+  playerView.send = (channel, payload) => sentToPlayer.push([channel, payload]);
+
   const playerManager = {
     registeredViewId: 42,
     getView: () => playerView,
@@ -239,7 +240,12 @@ test("PreviewManager authorizes only the registered player main frame and resolv
   const { PreviewManager, resolvePreviewURL } = loadTs(
     "src/main/managers/PreviewManager.ts",
     {
-      electron: { ipcMain },
+      electron: {
+        ipcMain,
+        webContents: {
+          fromId: (id) => (id === 42 ? playerView : undefined),
+        },
+      },
       "../mediaProtocol": {
         getMediaURL: (filePath) =>
           `kenku-media://local/secret-token/${encodeURIComponent(filePath)}`,
@@ -247,14 +253,13 @@ test("PreviewManager authorizes only the registered player main frame and resolv
     },
   );
 
+  // Only local file:// URLs resolve; remote http(s) and other schemes are refused
   assert.equal(
     resolvePreviewURL("file://%2Fmusic%2Fbattle%20theme.mp3"),
     "kenku-media://local/secret-token/%2Fmusic%2Fbattle%20theme.mp3",
   );
-  assert.equal(
-    resolvePreviewURL("https://example.com/audio.mp3"),
-    "https://example.com/audio.mp3",
-  );
+  assert.equal(resolvePreviewURL("https://example.com/audio.mp3"), null);
+  assert.equal(resolvePreviewURL("http://example.com/audio.mp3"), null);
   assert.equal(resolvePreviewURL("javascript:alert(1)"), null);
   assert.equal(resolvePreviewURL("data:audio/wav;base64,AAAA"), null);
 
@@ -272,7 +277,6 @@ test("PreviewManager authorizes only the registered player main frame and resolv
     duckLiveMonitor: true,
     requestId: 1,
   });
-  ipcMain.emit("PLAYER_PREVIEW_PLAY", tabEvent);
   assert.equal(captureCalls.length, 0);
 
   // Subframe inside player must also be ignored
@@ -286,7 +290,7 @@ test("PreviewManager authorizes only the registered player main frame and resolv
   });
   assert.equal(captureCalls.length, 0);
 
-  // Registered player main frame succeeds and resolves file:// -> kenku-media://
+  // Registered player main frame succeeds for local files
   const playerEvent = { sender: playerView, senderFrame: playerMainFrame };
   ipcMain.emit("PLAYER_PREVIEW_LOAD", playerEvent, {
     url: "file://%2Fmusic%2Ftavern.flac",
@@ -307,19 +311,30 @@ test("PreviewManager authorizes only the registered player main frame and resolv
     },
   ]);
 
-  // Unsupported scheme from player returns an error state and does not reach capture
+  // Remote URL from player returns an error state and does not reach unsandboxed capture window
   ipcMain.emit("PLAYER_PREVIEW_LOAD", playerEvent, {
-    url: "javascript:void(0)",
+    url: "https://example.com/remote.mp3",
     volume: 0.75,
     muted: false,
     duckLiveMonitor: true,
     requestId: 4,
   });
   assert.equal(captureCalls.length, 1);
-  assert.equal(sentToPlayer.length, 1);
   assert.equal(sentToPlayer[0][0], "PLAYER_PREVIEW_STATE");
   assert.equal(sentToPlayer[0][1].requestId, 4);
-  assert.ok(sentToPlayer[0][1].error);
+  assert.match(sentToPlayer[0][1].error, /local audio files/i);
+
+  // Subframe navigation does NOT stop preview, but main-frame navigation / crash / re-register DO
+  playerView.emit("did-start-navigation", {}, "https://sub", false, false);
+  assert.equal(captureCalls.length, 1);
+  playerView.emit("did-start-navigation", {}, "file:///player", false, true);
+  assert.equal(captureCalls[1][0], "stop");
+  playerView.emit("render-process-gone", {});
+  assert.equal(captureCalls[2][0], "stop");
+  ipcMain.emit("PLAYER_REGISTER_VIEW", {}, 42);
+  assert.equal(captureCalls[3][0], "stop");
+  playerView.emit("destroyed");
+  assert.equal(captureCalls[4][0], "stop");
 
   // Engine state from AudioCaptureManagerMain forwards to player view
   const engineState = {
@@ -335,15 +350,16 @@ test("PreviewManager authorizes only the registered player main frame and resolv
   assert.deepEqual(sentToPlayer[1], ["PLAYER_PREVIEW_STATE", engineState]);
 
   manager.destroy();
+  const countBefore = captureCalls.length;
   ipcMain.emit("PLAYER_PREVIEW_STOP", playerEvent);
-  assert.equal(captureCalls.length, 1);
+  assert.equal(captureCalls.length, countBefore);
 });
 
-test("PreviewAudioEngine isolates local preview on its own AudioContext, follows monitor device, and handles remote fallback", async () => {
+test("PreviewAudioEngine isolates local preview, refuses non-local URLs, handles rapid switching, and unducks when muted or volume=0", async () => {
   FakeAudioContext.instances = [];
   const createdElements = [];
   const states = [];
-  const playingChanges = [];
+  const audibleChanges = [];
 
   const { PreviewAudioEngine } = loadTs(
     "src/preload/managers/PreviewAudioEngine.ts",
@@ -365,10 +381,9 @@ test("PreviewAudioEngine isolates local preview on its own AudioContext, follows
 
   const engine = new PreviewAudioEngine({
     onState: (s) => states.push(s),
-    onPlayingChange: (p) => playingChanges.push(p),
+    onPlayingChange: (a) => audibleChanges.push(a),
   });
 
-  // Choosing monitor device before first preview must persist onto output sink
   await engine.setMonitorDevice("gm-headphones");
 
   engine.load({
@@ -380,63 +395,72 @@ test("PreviewAudioEngine isolates local preview on its own AudioContext, follows
   });
 
   assert.equal(FakeAudioContext.instances.length, 1);
-  // First created element is the preview source, second is the graph sink output
-  // (ensurePreviewGraph runs after source element is created)
-  const sourceEl = createdElements[0];
+  const firstSourceEl = createdElements[0];
   const outputEl = createdElements[1];
-  assert.equal(sourceEl.crossOrigin, "anonymous");
+  assert.equal(firstSourceEl.crossOrigin, "anonymous");
   assert.equal(outputEl.muted, false);
   assert.equal(outputEl.sinkId, "gm-headphones");
-  assert.deepEqual(playingChanges, [true]);
+  assert.deepEqual(audibleChanges, [true]);
+  assert.ok(engine.getDiagnostics().peakLevel > 0.4);
 
-  const diag = engine.getDiagnostics();
-  assert.equal(diag.routable, true);
-  assert.equal(diag.playing, true);
-  assert.equal(diag.sinkId, "gm-headphones");
-  assert.equal(diag.outputMuted, false);
-  assert.ok(diag.peakLevel > 0.4);
+  // Muting releases audible/duck state and drops peakLevel to 0; unmuting restores it
+  engine.setMuted(true);
+  assert.deepEqual(audibleChanges, [true, false]);
+  assert.equal(engine.getDiagnostics().peakLevel, 0);
+  engine.setMuted(false);
+  assert.deepEqual(audibleChanges, [true, false, true]);
 
-  // Switching monitor device updates sinkId immediately
+  // Setting volume to 0 also releases audible/duck state
+  engine.setVolume(0);
+  assert.deepEqual(audibleChanges, [true, false, true, false]);
+  engine.setVolume(0.8);
+  assert.deepEqual(audibleChanges, [true, false, true, false, true]);
+
+  // Switching device updates output sink immediately
   await engine.setMonitorDevice("usb-dac");
   assert.equal(outputEl.sinkId, "usb-dac");
 
   // Pending seek before metadata is held and applied on loadedmetadata
-  sourceEl.readyState = 0;
+  firstSourceEl.readyState = 0;
   engine.seek(35);
-  sourceEl.readyState = 4;
-  sourceEl.dispatch("loadedmetadata");
-  assert.equal(sourceEl.currentTime, 35);
+  firstSourceEl.readyState = 4;
+  firstSourceEl.dispatch("loadedmetadata");
+  assert.equal(firstSourceEl.currentTime, 35);
 
-  // Pausing and ending both notify onPlayingChange(false)
-  engine.pause();
-  assert.deepEqual(playingChanges, [true, false]);
-  engine.play();
-  assert.deepEqual(playingChanges, [true, false, true]);
-  sourceEl.ended = true;
-  sourceEl.paused = true;
-  sourceEl.dispatch("ended");
-  assert.deepEqual(playingChanges, [true, false, true, false]);
-  assert.equal(sourceEl.currentTime, 0);
+  // Rapid switch to a second track tears down the first element so stale events are ignored
+  engine.load({
+    url: "kenku-media://local/tok/%2Fmusic%2Ftavern.flac",
+    volume: 0.8,
+    muted: false,
+    duckLiveMonitor: true,
+    requestId: 11,
+  });
+  const secondSourceEl = createdElements[2];
+  const stateCountBeforeStale = states.length;
+  firstSourceEl.dispatch("ended");
+  firstSourceEl.dispatch("error");
+  assert.equal(states.length, stateCountBeforeStale);
 
-  // Loading a non-CORS remote URL falls back to direct element without crossOrigin
+  // An error on the active element releases audible/duck state
+  secondSourceEl.paused = true;
+  secondSourceEl.dispatch("error");
+  assert.equal(audibleChanges[audibleChanges.length - 1], false);
+
+  // Refuses non-kenku-media URLs directly in the engine as defense-in-depth
   engine.load({
     url: "https://example.com/ambience.mp3",
     volume: 0.5,
     muted: false,
     duckLiveMonitor: true,
-    requestId: 11,
+    requestId: 12,
   });
-  const remoteEl = createdElements[2];
-  assert.equal(remoteEl.crossOrigin, null);
-  assert.equal(remoteEl.volume, 0.5);
-  assert.equal(remoteEl.sinkId, "usb-dac");
-  assert.equal(engine.getDiagnostics().routable, false);
+  assert.match(states[states.length - 1].error, /local audio files/i);
 
   engine.destroy();
   assert.equal(FakeAudioContext.instances[0].closed, true);
 });
 
-test("AudioCaptureManagerPreload ducks only the local monitor post-worklet and keeps preview audible when This Computer is unticked", async () => {
+test("AudioCaptureManagerPreload keeps preview graph completely isolated, supports dedicated preview device, and ducks only post-worklet when audible", async () => {
   FakeAudioContext.instances = [];
   const createdElements = [];
   const sentIpc = [];
@@ -466,28 +490,26 @@ test("AudioCaptureManagerPreload ducks only the local monitor post-worklet and k
   );
 
   const capture = new AudioCaptureManagerPreload();
-  // Wire minimal live capture graph matching `_setupLoopback`
   capture._audioContext = new FakeAudioContext();
-  capture._pcmStreamNode = new FakeNode("pcm-worklet");
+  capture._pcmStreamNode = new FakeNode("pcm-worklet", capture._audioContext);
   await capture._setupLoopback();
 
   const liveOutputElement = capture._audioOutputElement;
   const monitorGainNode = capture._monitorGainNode;
   const duckGainNode = capture._monitorDuckGainNode;
 
-  // Verify graph topology: _pcmStreamNode -> _monitorGainNode -> _monitorDuckGainNode -> mediaDestination
-  // Nothing from preview ever connects into _pcmStreamNode.
+  // Topology: _pcmStreamNode -> _monitorGainNode -> _monitorDuckGainNode -> mediaDestination
   assert.equal(capture._pcmStreamNode.connections[0].dest, monitorGainNode);
   assert.equal(monitorGainNode.connections[0].dest, duckGainNode);
   assert.equal(duckGainNode.gain.value, 1);
 
-  // Untick "This Computer" (loopback = false) and pick monitor device
+  // Untick "This Computer", route Monitor to virtual cable, and route Preview to dedicated headset
   capture.setLoopback(false);
-  await capture.setMonitorDevice("gm-headset");
+  await capture.setMonitorDevice("vb-cable");
+  await capture.setPreviewDevice("gm-headset");
   assert.equal(liveOutputElement.muted, true);
-  assert.equal(liveOutputElement.sinkId, "gm-headset");
+  assert.equal(liveOutputElement.sinkId, "vb-cable");
 
-  // Start a preview: preview plays on its own unmuted sink on the same monitor device
   capture.previewLoad({
     url: "kenku-media://local/tok/%2Fmusic%2Fcheck.flac",
     volume: 0.9,
@@ -496,33 +518,244 @@ test("AudioCaptureManagerPreload ducks only the local monitor post-worklet and k
     requestId: 1,
   });
 
-  // Live monitor ducking engages (0.25), while live loopback remains muted
-  assert.equal(duckGainNode.gain.value, 0.25);
-  assert.equal(liveOutputElement.muted, true);
-  // Preview output stays unmuted on the chosen monitor device
+  // Preview plays on its dedicated headset, unmuted, even while loopback is muted on vb-cable
   const previewDiag = capture._previewEngine.getDiagnostics();
   assert.equal(previewDiag.playing, true);
   assert.equal(previewDiag.outputMuted, false);
   assert.equal(previewDiag.sinkId, "gm-headset");
-  // Preview runs in a separate AudioContext from the live broadcast context
-  assert.equal(FakeAudioContext.instances.length, 2);
-  assert.notEqual(
-    FakeAudioContext.instances[0],
-    FakeAudioContext.instances[1],
-  );
-
-  // Turning off ducking restores live monitor gain to 1 while preview keeps playing
-  capture.previewSetDuck(false);
-  assert.equal(duckGainNode.gain.value, 1);
-  assert.equal(capture._previewEngine.getDiagnostics().playing, true);
-
-  // Re-enabling ducking ducks live monitor again, and stopping preview restores it to 1
-  capture.previewSetDuck(true);
+  assert.equal(liveOutputElement.muted, true);
   assert.equal(duckGainNode.gain.value, 0.25);
+
+  // Explicit isolation check: no node created on the preview AudioContext connects
+  // to the capture AudioContext or `_pcmStreamNode`
+  assert.equal(FakeAudioContext.instances.length, 2);
+  const captureCtx = FakeAudioContext.instances[0];
+  const previewCtx = FakeAudioContext.instances[1];
+  assert.notEqual(captureCtx, previewCtx);
+  const captureNodeSet = new Set([
+    ...captureCtx.createdNodes,
+    capture._pcmStreamNode,
+  ]);
+  for (const node of previewCtx.createdNodes) {
+    for (const conn of node.connections) {
+      assert.equal(
+        captureNodeSet.has(conn.dest),
+        false,
+        "Preview graph node must never connect to live capture graph",
+      );
+    }
+  }
+
+  // Muting preview releases live monitor ducking; unmuting re-ducks
+  capture.previewSetMuted(true);
+  assert.equal(duckGainNode.gain.value, 1);
+  capture.previewSetMuted(false);
+  assert.equal(duckGainNode.gain.value, 0.25);
+
+  // Clearing dedicated preview device falls back to monitor device
+  await capture.setPreviewDevice("");
+  assert.equal(capture._previewEngine.getDiagnostics().sinkId, "vb-cable");
+
+  // Stopping preview restores duck gain to 1
   capture.previewStop();
   assert.equal(duckGainNode.gain.value, 1);
 
   capture._previewEngine.destroy();
+});
+
+test("AudioCaptureManagerMain replays settings on reload, reports interrupted preview, and checks sender", () => {
+  const ipcMain = new EventEmitter();
+  const sentToCapture = [];
+  const fakeWebContents = new EventEmitter();
+  fakeWebContents.loadURL = () => {};
+  fakeWebContents.send = (ch, ...args) => sentToCapture.push([ch, ...args]);
+  fakeWebContents.close = () => {};
+  fakeWebContents.destroy = () => {};
+  fakeWebContents.reload = () => {};
+
+  class FakeBrowserWindow {
+    constructor() {
+      this.webContents = fakeWebContents;
+    }
+    isDestroyed() {
+      return false;
+    }
+  }
+
+  const { AudioCaptureManagerMain } = loadTs(
+    "src/main/managers/AudioCaptureManagerMain.ts",
+    {
+      electron: {
+        BrowserWindow: FakeBrowserWindow,
+        ipcMain,
+        MessageChannelMain: class {},
+        webContents: { fromId: () => fakeWebContents },
+      },
+      "prism-media": { opus: { Encoder: class {} } },
+    },
+    {
+      AUDIO_CAPTURE_WINDOW_WEBPACK_ENTRY: "http://capture",
+      AUDIO_CAPTURE_WINDOW_PRELOAD_WEBPACK_ENTRY: "preload.js",
+      PLAYER_WINDOW_WEBPACK_ENTRY: "http://player",
+    },
+  );
+
+  const main = new AudioCaptureManagerMain();
+  const receivedStates = [];
+  main.on("previewState", (s) => receivedStates.push(s));
+
+  ipcMain.emit("AUDIO_CAPTURE_SET_LOOPBACK", {}, false);
+  ipcMain.emit("AUDIO_CAPTURE_SET_MONITOR_GAIN", {}, 0.4);
+  ipcMain.emit("AUDIO_CAPTURE_SET_MONITOR_DEVICE", {}, "speakers");
+  ipcMain.emit("AUDIO_CAPTURE_SET_PREVIEW_DEVICE", {}, "headphones");
+  main.previewLoad({
+    url: "kenku-media://local/tok/test",
+    volume: 0.8,
+    muted: false,
+    duckLiveMonitor: false,
+    requestId: 77,
+  });
+
+  // Spoofed AUDIO_CAPTURE_PREVIEW_STATE from another sender is ignored
+  ipcMain.emit(
+    "AUDIO_CAPTURE_PREVIEW_STATE",
+    { sender: { fake: true } },
+    { requestId: 77, playing: true },
+  );
+  assert.equal(receivedStates.length, 0);
+
+  // Capture window reloads (e.g. after crash): replays all monitor/preview settings
+  // and emits an interrupted error for the active preview so the player closes the deck
+  sentToCapture.length = 0;
+  fakeWebContents.emit("did-finish-load");
+  assert.deepEqual(
+    sentToCapture.map((c) => c[0]),
+    [
+      "AUDIO_CAPTURE_SET_LOOPBACK",
+      "AUDIO_CAPTURE_SET_MONITOR_GAIN",
+      "AUDIO_CAPTURE_SET_MONITOR_DEVICE",
+      "AUDIO_CAPTURE_SET_PREVIEW_DEVICE",
+      "AUDIO_CAPTURE_PREVIEW_SET_DUCK",
+    ],
+  );
+  assert.equal(sentToCapture[3][1], "headphones");
+  assert.equal(receivedStates.length, 1);
+  assert.equal(receivedStates[0].requestId, 77);
+  assert.equal(receivedStates[0].error, "Preview was interrupted");
+
+  main.destroy();
+});
+
+test("previewHelpers promote-to-live plans protect already-live tracks and clamp edge positions", () => {
+  const { isPreviewableUrl, computePromoteStartAt, planPromoteToLive } = loadTs(
+    "src/player/features/preview/previewHelpers.ts",
+  );
+
+  assert.equal(isPreviewableUrl("file://%2Fmusic%2Fa.flac"), true);
+  assert.equal(isPreviewableUrl("https://example.com/a.mp3"), false);
+
+  assert.equal(computePromoteStartAt(0.4, 120, false), 0);
+  assert.equal(computePromoteStartAt(15.7, 120, false), 15.7);
+  assert.equal(computePromoteStartAt(119.5, 120, false), 0);
+  assert.equal(computePromoteStartAt(40, 120, true), 0);
+
+  const trackItem = {
+    id: "t1",
+    kind: "track",
+    title: "Battle",
+    parentId: "p1",
+    parentTitle: "Combat",
+    url: "file://%2Fbattle.flac",
+  };
+
+  // Same track already live & playing at startAt=0 must NOT seek back to 0
+  assert.deepEqual(
+    JSON.parse(
+      JSON.stringify(
+        planPromoteToLive({
+          item: trackItem,
+          progress: 0.2,
+          duration: 120,
+          ended: false,
+          liveTrackId: "t1",
+          liveHasPlayback: true,
+          livePlaying: true,
+        }),
+      ),
+    ),
+    { type: "none" },
+  );
+
+  // Same track live & paused at startAt=0 resumes without restarting
+  assert.deepEqual(
+    JSON.parse(
+      JSON.stringify(
+        planPromoteToLive({
+          item: trackItem,
+          progress: 0,
+          duration: 120,
+          ended: true,
+          liveTrackId: "t1",
+          liveHasPlayback: true,
+          livePlaying: false,
+        }),
+      ),
+    ),
+    { type: "resume-live-track" },
+  );
+
+  // Same track scrubbed to 42.8s seeks live track to 42s
+  assert.deepEqual(
+    JSON.parse(
+      JSON.stringify(
+        planPromoteToLive({
+          item: trackItem,
+          progress: 42.8,
+          duration: 120,
+          ended: false,
+          liveTrackId: "t1",
+          liveHasPlayback: true,
+          livePlaying: true,
+        }),
+      ),
+    ),
+    { type: "seek-and-resume-live-track", position: 42 },
+  );
+
+  // Different track plays in its parent playlist starting from preview position
+  assert.deepEqual(
+    JSON.parse(
+      JSON.stringify(
+        planPromoteToLive({
+          item: trackItem,
+          progress: 23.4,
+          duration: 120,
+          ended: false,
+          liveTrackId: "t2",
+          liveHasPlayback: true,
+          livePlaying: true,
+        }),
+      ),
+    ),
+    { type: "play-track", trackId: "t1", playlistId: "p1", startAt: 23.4 },
+  );
+
+  // Soundboard sound promotes as play-sound
+  assert.deepEqual(
+    JSON.parse(
+      JSON.stringify(
+        planPromoteToLive({
+          item: { ...trackItem, id: "s1", kind: "sound" },
+          progress: 2,
+          duration: 5,
+          ended: false,
+          liveHasPlayback: false,
+          livePlaying: false,
+        }),
+      ),
+    ),
+    { type: "play-sound", soundId: "s1" },
+  );
 });
 
 test("previewSlice tracks active preview, drops stale requestIds, and clamps settings", () => {

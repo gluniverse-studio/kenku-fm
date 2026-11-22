@@ -4,6 +4,7 @@ import ListItemButton from "@mui/material/ListItemButton";
 import ListItemText from "@mui/material/ListItemText";
 import PlayArrow from "@mui/icons-material/PlayArrowRounded";
 import Pause from "@mui/icons-material/PauseRounded";
+import StopRounded from "@mui/icons-material/StopRounded";
 import HeadphonesRounded from "@mui/icons-material/HeadphonesRounded";
 import IconButton from "@mui/material/IconButton";
 import Paper from "@mui/material/Paper";
@@ -18,6 +19,7 @@ import { Track, removeTrack, Playlist } from "./playlistsSlice";
 import { useDispatch, useSelector } from "react-redux";
 import { TrackSettings } from "./TrackSettings";
 import { RootState } from "../../app/store";
+import { normalizedSource } from "../../common/mediaURL";
 import {
   playPause,
   removeTrackFromQueue,
@@ -25,6 +27,7 @@ import {
   stopTrack,
   updatePlayback,
 } from "./playlistPlaybackSlice";
+import { isPreviewableUrl } from "../preview/previewHelpers";
 import {
   PREVIEW_ACCENT,
   PREVIEW_BORDER,
@@ -59,6 +62,7 @@ export function TrackItem({
   const previewPlaying = useSelector(
     (state: RootState) => isPreviewTrack && state.preview.playing,
   );
+  const canPreview = isPreviewableUrl(normalizedSource(track));
   const dispatch = useDispatch();
 
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -143,38 +147,47 @@ export function TrackItem({
           />
           <Tooltip
             title={
-              previewPlaying
-                ? "Stop preview (only you hear this)"
-                : "Preview (only you hear this)"
+              !canPreview
+                ? "Preview is only available for local audio files"
+                : previewPlaying
+                  ? "Stop preview (only you hear this)"
+                  : "Preview (only you hear this)"
             }
           >
-            <IconButton
-              aria-label={
-                previewPlaying
-                  ? `stop preview ${track.title}`
-                  : `preview ${track.title}`
-              }
-              size="small"
-              onPointerDown={(e) => e.stopPropagation()}
-              onClick={handlePreview}
-              sx={{
-                mr: 0.5,
-                color: isPreviewTrack
-                  ? PREVIEW_ACCENT
-                  : "rgba(245, 183, 76, 0.75)",
-                backgroundColor: isPreviewTrack ? PREVIEW_TINT : "transparent",
-                border: `1px solid ${
-                  isPreviewTrack ? PREVIEW_BORDER : "rgba(245, 183, 76, 0.25)"
-                }`,
-                "&:hover": {
-                  color: PREVIEW_ACCENT,
-                  backgroundColor: PREVIEW_TINT_HOVER,
-                  borderColor: PREVIEW_BORDER,
-                },
-              }}
-            >
-              <HeadphonesRounded fontSize="small" />
-            </IconButton>
+            <span>
+              <IconButton
+                aria-label={
+                  previewPlaying
+                    ? `stop preview ${track.title}`
+                    : `preview ${track.title}`
+                }
+                size="small"
+                disabled={!canPreview}
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={handlePreview}
+                sx={{
+                  mr: 0.5,
+                  color: isPreviewTrack
+                    ? PREVIEW_ACCENT
+                    : "rgba(245, 183, 76, 0.75)",
+                  backgroundColor: isPreviewTrack ? PREVIEW_TINT : "transparent",
+                  border: `1px solid ${
+                    isPreviewTrack ? PREVIEW_BORDER : "rgba(245, 183, 76, 0.25)"
+                  }`,
+                  "&:hover": {
+                    color: PREVIEW_ACCENT,
+                    backgroundColor: PREVIEW_TINT_HOVER,
+                    borderColor: PREVIEW_BORDER,
+                  },
+                }}
+              >
+                {previewPlaying ? (
+                  <StopRounded fontSize="small" />
+                ) : (
+                  <HeadphonesRounded fontSize="small" />
+                )}
+              </IconButton>
+            </span>
           </Tooltip>
           <Divider
             orientation="vertical"

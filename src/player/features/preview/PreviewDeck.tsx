@@ -111,6 +111,9 @@ export function PreviewDeck({
       preview.item?.kind === "track" &&
       state.playlistPlayback.track?.id === preview.item.id,
   );
+  const isLiveTrackPlaying = useSelector(
+    (state: RootState) => state.playlistPlayback.playing,
+  );
   const isSameLiveSound = useSelector(
     (state: RootState) =>
       preview.item?.kind === "sound" &&
@@ -134,28 +137,46 @@ export function PreviewDeck({
     clampedTime >= 1 &&
     (duration <= 0 || clampedTime < duration - 1);
 
-  const promoteLabel = canPromoteAtPosition
-    ? `Play live from ${formatDuration(clampedTime)}`
-    : "Play live";
+  const promoteDisabled =
+    isSameLiveTrack && !canPromoteAtPosition && isLiveTrackPlaying;
+
+  const promoteLabel =
+    preview.item.kind === "sound"
+      ? isSameLiveSound
+        ? "Restart live"
+        : "Play live"
+      : canPromoteAtPosition
+        ? `Play live from ${formatDuration(clampedTime)}`
+        : isSameLiveTrack
+          ? isLiveTrackPlaying
+            ? "Already live"
+            : "Resume live"
+          : "Play live";
 
   const promoteTooltip =
     preview.item.kind === "track"
       ? isSameLiveTrack
-        ? "Stop preview and jump the live track to this position"
+        ? canPromoteAtPosition
+          ? "Stop preview and jump the live track to this position"
+          : isLiveTrackPlaying
+            ? "This track is already playing live — scrub to a position to jump live there, or close preview"
+            : "Stop preview and resume the live track"
         : "Stop preview and play this track live to the table from here"
-      : "Stop preview and play this sound live to the table";
+      : isSameLiveSound
+        ? "Stop preview and restart this sound live from the beginning"
+        : "Stop preview and play this sound live to the table";
 
   function handleDeckKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
-    if (event.key !== " ") {
+    if (event.key !== " " || event.defaultPrevented) {
       return;
     }
     const target = event.target as HTMLElement | null;
-    // Buttons and inputs handle Space natively; avoid double-toggling them.
+    // Interactive controls (buttons, chips with role="button", sliders, inputs)
+    // handle Space natively; avoid double-toggling them.
     if (
-      target &&
-      (target.tagName === "BUTTON" ||
-        target.tagName === "INPUT" ||
-        target.tagName === "TEXTAREA")
+      target?.closest(
+        'button, [role="button"], [role="slider"], input, textarea',
+      )
     ) {
       return;
     }
@@ -279,25 +300,28 @@ export function PreviewDeck({
           </Tooltip>
 
           <Tooltip title={promoteTooltip}>
-            <Button
-              size="small"
-              variant="contained"
-              color="primary"
-              startIcon={<SensorsRounded sx={{ fontSize: "1rem" }} />}
-              onClick={onPromoteToLive}
-              sx={{
-                py: 0.25,
-                px: 1.25,
-                minHeight: 26,
-                fontSize: "0.75rem",
-                fontWeight: 700,
-                textTransform: "none",
-                borderRadius: "999px",
-                color: "#161826",
-              }}
-            >
-              {promoteLabel}
-            </Button>
+            <span>
+              <Button
+                size="small"
+                variant="contained"
+                color="primary"
+                disabled={promoteDisabled}
+                startIcon={<SensorsRounded sx={{ fontSize: "1rem" }} />}
+                onClick={onPromoteToLive}
+                sx={{
+                  py: 0.25,
+                  px: 1.25,
+                  minHeight: 26,
+                  fontSize: "0.75rem",
+                  fontWeight: 700,
+                  textTransform: "none",
+                  borderRadius: "999px",
+                  color: "#161826",
+                }}
+              >
+                {promoteLabel}
+              </Button>
+            </span>
           </Tooltip>
 
           <Tooltip title="Stop and close preview (Esc)">

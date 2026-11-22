@@ -206,6 +206,7 @@ export class AudioCaptureManagerMain extends TypedEmitter<AudioCaptureManagerEve
   _loopback = true;
   _monitorGain = 1;
   _monitorDeviceId = "";
+  _previewDeviceId = "";
   _duckLiveMonitor = true;
   _activePreviewRequestId = 0;
   /**
@@ -259,6 +260,10 @@ export class AudioCaptureManagerMain extends TypedEmitter<AudioCaptureManagerEve
       this._handleSetMonitorDevice
     );
     ipcMain.on(
+      "AUDIO_CAPTURE_SET_PREVIEW_DEVICE",
+      this._handleSetPreviewDevice
+    );
+    ipcMain.on(
       "AUDIO_CAPTURE_START_EXTERNAL_AUDIO_CAPTURE",
       this._handleStartExternalAudioCapture
     );
@@ -298,6 +303,10 @@ export class AudioCaptureManagerMain extends TypedEmitter<AudioCaptureManagerEve
     ipcMain.off(
       "AUDIO_CAPTURE_SET_MONITOR_DEVICE",
       this._handleSetMonitorDevice
+    );
+    ipcMain.off(
+      "AUDIO_CAPTURE_SET_PREVIEW_DEVICE",
+      this._handleSetPreviewDevice
     );
     ipcMain.off(
       "AUDIO_CAPTURE_START_EXTERNAL_AUDIO_CAPTURE",
@@ -556,11 +565,16 @@ export class AudioCaptureManagerMain extends TypedEmitter<AudioCaptureManagerEve
       this._monitorDeviceId
     );
     this._browserWindow.webContents.send(
+      "AUDIO_CAPTURE_SET_PREVIEW_DEVICE",
+      this._previewDeviceId
+    );
+    this._browserWindow.webContents.send(
       "AUDIO_CAPTURE_PREVIEW_SET_DUCK",
       this._duckLiveMonitor
     );
     if (this._activePreviewRequestId > 0) {
-      // A reload tears down the preview element, so tell the player it stopped
+      // A reload tears down the preview element, so report an interruption so
+      // the player closes the deck instead of leaving inert controls open
       this.emit("previewState", {
         requestId: this._activePreviewRequestId,
         loading: false,
@@ -569,6 +583,7 @@ export class AudioCaptureManagerMain extends TypedEmitter<AudioCaptureManagerEve
         duration: 0,
         ended: false,
         level: 0,
+        error: "Preview was interrupted",
       });
       this._activePreviewRequestId = 0;
     }
@@ -674,6 +689,14 @@ export class AudioCaptureManagerMain extends TypedEmitter<AudioCaptureManagerEve
     this._monitorDeviceId = deviceId;
     this._browserWindow.webContents.send(
       "AUDIO_CAPTURE_SET_MONITOR_DEVICE",
+      deviceId
+    );
+  };
+
+  _handleSetPreviewDevice = (_: Electron.IpcMainEvent, deviceId: string) => {
+    this._previewDeviceId = deviceId;
+    this._browserWindow.webContents.send(
+      "AUDIO_CAPTURE_SET_PREVIEW_DEVICE",
       deviceId
     );
   };

@@ -162,15 +162,17 @@ export class AudioCaptureManagerPreload {
   _loopback = true;
   _monitorGain = 1;
   _monitorDeviceId = "";
+  _previewDeviceId = "";
+  _monitorDeviceSeq = 0;
   _duckLiveMonitor = true;
-  _previewPlaying = false;
+  _previewAudible = false;
   /** GM-only preview engine running on its own AudioContext, isolated from `_pcmStreamNode` */
   _previewEngine = new PreviewAudioEngine({
     onState: (state) => {
       ipcRenderer.send("AUDIO_CAPTURE_PREVIEW_STATE", state);
     },
-    onPlayingChange: (playing) => {
-      this._previewPlaying = playing;
+    onPlayingChange: (audible) => {
+      this._previewAudible = audible;
       this._applyMonitorDuck();
     },
     onWarning: (message) => {
@@ -691,23 +693,38 @@ export class AudioCaptureManagerPreload {
     }
   }
 
-  /** Send the local monitoring and GM previews to a specific output device, or the default one */
+  /** Send local monitoring (and previews following Monitor) to a specific output device */
   async setMonitorDevice(deviceId: string): Promise<void> {
     this._monitorDeviceId = deviceId;
-    await this._previewEngine.setMonitorDevice(deviceId);
-    const element = this._audioOutputElement;
-    if (!element) {
-      return;
+    const seq = ++this._monitorDeviceSeq;
+    const tasks: Promise<void>[] = [];
+    if (!this._previewDeviceId) {
+      tasks.push(this._previewEngine.setMonitorDevice(deviceId));
     }
-    try {
-      await element.setSinkId(deviceId);
-    } catch (error) {
-      this._reportWarning(
-        `Unable to send local audio monitoring to the selected output device: ${
-          (error as Error).message
-        }`,
+    const element = this._audioOutputElement;
+    if (element) {
+      tasks.push(
+        element.setSinkId(deviceId).catch((error) => {
+          if (seq !== this._monitorDeviceSeq) {
+            return;
+          }
+          this._reportWarning(
+            `Unable to send local audio monitoring to the selected output device: ${
+              (error as Error).message
+            }`,
+          );
+        }),
       );
     }
+    await Promise.allSettled(tasks);
+  }
+
+  /** Route GM-only previews to a dedicated output device, or follow Monitor when empty */
+  async setPreviewDevice(deviceId: string): Promise<void> {
+    this._previewDeviceId = deviceId;
+    await this._previewEngine.setMonitorDevice(
+      deviceId || this._monitorDeviceId,
+    );
   }
 
   /**
@@ -725,7 +742,7 @@ export class AudioCaptureManagerPreload {
   }
 
   _targetDuckGain(): number {
-    return this._previewPlaying && this._duckLiveMonitor
+    return this._previewAudible && this._duckLiveMonitor
       ? PREVIEW_DUCK_GAIN
       : 1;
   }

@@ -83,6 +83,10 @@ ipcRenderer.on("AUDIO_CAPTURE_SET_MONITOR_DEVICE", (_, deviceId: string) => {
   audioCaptureManager.setMonitorDevice(deviceId);
 });
 
+ipcRenderer.on("AUDIO_CAPTURE_SET_PREVIEW_DEVICE", (_, deviceId: string) => {
+  audioCaptureManager.setPreviewDevice(deviceId);
+});
+
 ipcRenderer.on("AUDIO_CAPTURE_SET_NORMALIZE", (_, enabled: boolean) => {
   audioCaptureManager.setNormalize(enabled);
 });

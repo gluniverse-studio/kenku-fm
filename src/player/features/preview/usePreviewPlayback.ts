@@ -7,6 +7,7 @@ import { PreviewEngineState } from "../../../types/preview";
 import { Playlist, Track } from "../playlists/playlistsSlice";
 import { playPause, startQueue } from "../playlists/playlistPlaybackSlice";
 import { Sound, Soundboard } from "../soundboards/soundboardsSlice";
+import { isPreviewableUrl, planPromoteToLive } from "./previewHelpers";
 import {
   clearPreview,
   setPreviewDuckLiveMonitor,
@@ -40,7 +41,8 @@ export function usePreviewPlayback({
 }: UsePreviewPlaybackOptions) {
   const dispatch = useDispatch();
   const store = useStore<RootState>();
-  const requestIdRef = useRef(0);
+  // Seed from wall clock so a reloaded player never collides with an old request id
+  const requestIdRef = useRef(Date.now());
 
   const previewItem = useSelector((state: RootState) => state.preview.item);
   const playlists = useSelector((state: RootState) => state.playlists);
@@ -54,8 +56,10 @@ export function usePreviewPlayback({
     dispatch(clearPreview());
   }, [dispatch]);
 
-  // Listen for engine state updates from the Audio Capture window
+  // Listen for engine state updates from the Audio Capture window and ensure
+  // any lingering preview from before a reload is stopped cleanly on mount.
   useEffect(() => {
+    window.player.previewStop();
     window.player.on("PLAYER_PREVIEW_STATE", (args) => {
       const state = args[0] as PreviewEngineState | undefined;
       if (!state || state.requestId !== requestIdRef.current) {
@@ -65,7 +69,11 @@ export function usePreviewPlayback({
       if (state.error) {
         const title = store.getState().preview.item?.title;
         onError(
-          title ? `Unable to preview "${title}"` : state.error,
+          state.error === "Preview was interrupted"
+            ? state.error
+            : title
+              ? `Unable to preview "${title}": ${state.error}`
+              : state.error,
         );
         requestIdRef.current += 1;
         window.player.previewStop();
@@ -79,7 +87,8 @@ export function usePreviewPlayback({
     };
   }, [dispatch, onError, store]);
 
-  // Stop preview if the underlying item/container is deleted, and keep titles synced
+  // Stop preview if the underlying item/container is deleted or its URL changes,
+  // and keep displayed titles synced with edits.
   useEffect(() => {
     if (!previewItem) {
       return;
@@ -87,7 +96,7 @@ export function usePreviewPlayback({
     if (previewItem.kind === "track") {
       const track = playlists.tracks[previewItem.id];
       const playlist = playlists.playlists.byId[previewItem.parentId];
-      if (!track || !playlist) {
+      if (!track || !playlist || normalizedSource(track) !== previewItem.url) {
         close();
         return;
       }
@@ -105,7 +114,11 @@ export function usePreviewPlayback({
     } else {
       const sound = soundboards.sounds[previewItem.id];
       const soundboard = soundboards.soundboards.byId[previewItem.parentId];
-      if (!sound || !soundboard) {
+      if (
+        !sound ||
+        !soundboard ||
+        normalizedSource(sound) !== previewItem.url
+      ) {
         close();
         return;
       }
@@ -160,6 +173,11 @@ export function usePreviewPlayback({
 
   const previewTrack = useCallback(
     (track: Track, playlist: Playlist) => {
+      const url = normalizedSource(track);
+      if (!isPreviewableUrl(url)) {
+        onError("Preview is only available for local audio files");
+        return;
+      }
       const current = store.getState().preview;
       if (current.item?.kind === "track" && current.item.id === track.id) {
         if (current.playing || current.loading) {
@@ -170,7 +188,6 @@ export function usePreviewPlayback({
         return;
       }
       const requestId = ++requestIdRef.current;
-      const url = normalizedSource(track);
       dispatch(
         startPreview({
           requestId,
@@ -192,11 +209,16 @@ export function usePreviewPlayback({
         requestId,
       });
     },
-    [close, dispatch, store],
+    [close, dispatch, onError, store],
   );
 
   const previewSound = useCallback(
     (sound: Sound, soundboard: Soundboard) => {
+      const url = normalizedSource(sound);
+      if (!isPreviewableUrl(url)) {
+        onError("Preview is only available for local audio files");
+        return;
+      }
       const current = store.getState().preview;
       if (current.item?.kind === "sound" && current.item.id === sound.id) {
         if (current.playing || current.loading) {
@@ -207,7 +229,6 @@ export function usePreviewPlayback({
         return;
       }
       const requestId = ++requestIdRef.current;
-      const url = normalizedSource(sound);
       dispatch(
         startPreview({
           requestId,
@@ -229,7 +250,7 @@ export function usePreviewPlayback({
         requestId,
       });
     },
-    [close, dispatch, store],
+    [close, dispatch, onError, store],
   );
 
   const togglePlay = useCallback(() => {
@@ -276,44 +297,55 @@ export function usePreviewPlayback({
   const promoteToLive = useCallback(() => {
     const state = store.getState();
     const { item, progress, duration, ended } = state.preview;
+    const plan = planPromoteToLive({
+      item,
+      progress,
+      duration,
+      ended,
+      liveTrackId: state.playlistPlayback.track?.id,
+      liveHasPlayback: Boolean(state.playlistPlayback.playback),
+      livePlaying: state.playlistPlayback.playing,
+    });
     if (!item) {
       return;
     }
     // Always stop preview before starting live so the GM never hears both stacked
     close();
 
-    if (item.kind === "track") {
-      const startAt =
-        !ended &&
-        progress >= 1 &&
-        (duration <= 0 || progress < duration - 1)
-          ? progress
-          : 0;
-      const livePlayback = state.playlistPlayback;
-      if (livePlayback.track?.id === item.id && livePlayback.playback) {
-        onLivePlaylistSeek(Math.floor(startAt));
-        if (!livePlayback.playing) {
+    switch (plan.type) {
+      case "none":
+        return;
+      case "resume-live-track":
+        dispatch(playPause(true));
+        return;
+      case "seek-and-resume-live-track":
+        onLivePlaylistSeek(plan.position);
+        if (!state.playlistPlayback.playing) {
           dispatch(playPause(true));
         }
         return;
-      }
-      const track = state.playlists.tracks[item.id];
-      const playlist = state.playlists.playlists.byId[item.parentId];
-      if (!track || !playlist) {
+      case "play-track": {
+        const track = state.playlists.tracks[plan.trackId];
+        const playlist = state.playlists.playlists.byId[plan.playlistId];
+        if (!track || !playlist) {
+          return;
+        }
+        dispatch(
+          startQueue({
+            tracks: [...playlist.tracks],
+            trackId: track.id,
+            playlistId: playlist.id,
+          }),
+        );
+        onLivePlaylistPlay(track, plan.startAt);
         return;
       }
-      dispatch(
-        startQueue({
-          tracks: [...playlist.tracks],
-          trackId: track.id,
-          playlistId: playlist.id,
-        }),
-      );
-      onLivePlaylistPlay(track, startAt);
-    } else {
-      const sound = state.soundboards.sounds[item.id];
-      if (sound) {
-        onLiveSoundboardPlay(sound);
+      case "play-sound": {
+        const sound = state.soundboards.sounds[plan.soundId];
+        if (sound) {
+          onLiveSoundboardPlay(sound);
+        }
+        return;
       }
     }
   }, [

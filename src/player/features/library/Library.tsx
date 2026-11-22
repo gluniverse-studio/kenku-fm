@@ -1,5 +1,5 @@
 import React from "react";
-import { useDispatch, useSelector } from "react-redux";
+import { shallowEqual, useDispatch, useSelector } from "react-redux";
 import { Link as RouterLink } from "react-router-dom";
 import Link from "@mui/material/Link";
 import Card from "@mui/material/Card";
@@ -13,12 +13,15 @@ import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import Divider from "@mui/material/Divider";
 import HeadphonesRounded from "@mui/icons-material/HeadphonesRounded";
+import StopRounded from "@mui/icons-material/StopRounded";
 import { RootState } from "../../app/store";
+import { normalizedSource } from "../../common/mediaURL";
 import { Playlist, Track } from "../playlists/playlistsSlice";
 import { Sound, Soundboard } from "../soundboards/soundboardsSlice";
 import { startQueue } from "../playlists/playlistPlaybackSlice";
 import { useLibraryFilter } from "./LibraryControls";
 import { useNormalizationControls } from "./NormalizationProvider";
+import { isPreviewableUrl } from "../preview/previewHelpers";
 import {
   PREVIEW_ACCENT,
   PREVIEW_BORDER,
@@ -40,7 +43,14 @@ export function Library({
   const dispatch = useDispatch();
   const playlists = useSelector((state: RootState) => state.playlists);
   const soundboards = useSelector((state: RootState) => state.soundboards);
-  const preview = useSelector((state: RootState) => state.preview);
+  const preview = useSelector(
+    (state: RootState) => ({
+      itemId: state.preview.item?.id,
+      itemKind: state.preview.item?.kind,
+      playing: state.preview.playing,
+    }),
+    shallowEqual,
+  );
   const items = [
     ...Object.values(playlists.playlists.byId).flatMap((parent) =>
       parent.tracks.map((id) => ({
@@ -71,13 +81,14 @@ export function Library({
         <List sx={{ maxHeight: 360, overflowY: "auto" }}>
           {visible.map((item) => {
             const isPreviewing =
-              preview.item?.kind === item.kind && preview.item.id === item.id;
+              preview.itemKind === item.kind && preview.itemId === item.id;
             const isPreviewPlaying = isPreviewing && preview.playing;
+            const canPreview = isPreviewableUrl(normalizedSource(item));
             return (
               <ListItem
                 key={item.key}
                 sx={{
-                  pr: "172px",
+                  pr: "208px",
                   ...(isPreviewing && {
                     boxShadow: `inset 3px 0 0 ${PREVIEW_ACCENT}`,
                   }),
@@ -86,45 +97,56 @@ export function Library({
                   <Stack direction="row" spacing={1} alignItems="center">
                     <Tooltip
                       title={
-                        isPreviewPlaying
-                          ? "Stop preview (only you hear this)"
-                          : "Preview (only you hear this)"
+                        !canPreview
+                          ? "Preview is only available for local audio files"
+                          : isPreviewPlaying
+                            ? "Stop preview (only you hear this)"
+                            : "Preview (only you hear this)"
                       }
                     >
-                      <Button
-                        size="small"
-                        variant="outlined"
-                        startIcon={<HeadphonesRounded fontSize="small" />}
-                        onClick={() => {
-                          if (item.kind === "track") {
-                            onPreviewTrack(
-                              playlists.tracks[item.id],
-                              playlists.playlists.byId[item.parent.id],
-                            );
-                          } else {
-                            onPreviewSound(
-                              soundboards.sounds[item.id],
-                              soundboards.soundboards.byId[item.parent.id],
-                            );
+                      <span>
+                        <Button
+                          size="small"
+                          variant="outlined"
+                          disabled={!canPreview}
+                          startIcon={
+                            isPreviewPlaying ? (
+                              <StopRounded fontSize="small" />
+                            ) : (
+                              <HeadphonesRounded fontSize="small" />
+                            )
                           }
-                        }}
-                        sx={{
-                          color: PREVIEW_ACCENT,
-                          borderColor: isPreviewing
-                            ? PREVIEW_ACCENT
-                            : PREVIEW_BORDER,
-                          backgroundColor: isPreviewing
-                            ? PREVIEW_TINT
-                            : "transparent",
-                          textTransform: "none",
-                          "&:hover": {
-                            borderColor: PREVIEW_ACCENT,
-                            backgroundColor: PREVIEW_TINT_HOVER,
-                          },
-                        }}
-                      >
-                        {isPreviewPlaying ? "Stop" : "Preview"}
-                      </Button>
+                          onClick={() => {
+                            if (item.kind === "track") {
+                              onPreviewTrack(
+                                playlists.tracks[item.id],
+                                playlists.playlists.byId[item.parent.id],
+                              );
+                            } else {
+                              onPreviewSound(
+                                soundboards.sounds[item.id],
+                                soundboards.soundboards.byId[item.parent.id],
+                              );
+                            }
+                          }}
+                          sx={{
+                            color: PREVIEW_ACCENT,
+                            borderColor: isPreviewing
+                              ? PREVIEW_ACCENT
+                              : PREVIEW_BORDER,
+                            backgroundColor: isPreviewing
+                              ? PREVIEW_TINT
+                              : "transparent",
+                            textTransform: "none",
+                            "&:hover": {
+                              borderColor: PREVIEW_ACCENT,
+                              backgroundColor: PREVIEW_TINT_HOVER,
+                            },
+                          }}
+                        >
+                          {isPreviewPlaying ? "Stop preview" : "Preview"}
+                        </Button>
+                      </span>
                     </Tooltip>
                     <Tooltip title="Play live (table hears this)">
                       <Button

@@ -1,4 +1,4 @@
-import { ipcMain } from "electron";
+import { ipcMain, webContents } from "electron";
 
 import { getMediaURL } from "../mediaProtocol";
 import { PreviewEngineState, PreviewLoadCommand } from "../../types/preview";
@@ -8,35 +8,25 @@ import { PlayerManager } from "./PlayerManager";
 /**
  * Resolve a stored library URL for the hidden Audio Capture window.
  *
- * Local `file://` URLs are converted to the per-launch `kenku-media://`
- * capability URL here in the main process so the secret token stays off
- * untrusted web views. Remote `http(s)://` URLs pass through unchanged; any
- * other scheme is refused.
+ * Only local `file://` URLs are accepted and converted to the per-launch
+ * `kenku-media://` capability URL here in the main process. The Audio Capture
+ * window runs with `sandbox: false` for its preload audio worklet/worker, so
+ * refusing remote `http(s)://` URLs ensures it never fetches or decodes
+ * untrusted third-party media.
  */
 export function resolvePreviewURL(url: string): string | null {
-  if (typeof url !== "string" || url.length === 0) {
+  if (typeof url !== "string" || !url.startsWith("file://")) {
     return null;
   }
-  if (url.startsWith("file://")) {
-    try {
-      const filePath = decodeURIComponent(url.slice("file://".length));
-      if (!filePath) {
-        return null;
-      }
-      return getMediaURL(filePath);
-    } catch {
+  try {
+    const filePath = decodeURIComponent(url.slice("file://".length));
+    if (!filePath) {
       return null;
     }
-  }
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
-      return url;
-    }
+    return getMediaURL(filePath);
   } catch {
     return null;
   }
-  return null;
 }
 
 /**
@@ -46,10 +36,15 @@ export function resolvePreviewURL(url: string): string | null {
  * Every command is checked against the registered player view's main frame so
  * arbitrary web pages loaded in browser tabs can neither trigger preview
  * playback nor resolve local file paths through `kenku-media://`.
+ *
+ * Preview playback is also stopped automatically whenever the registered player
+ * view reloads, navigates, crashes, is destroyed, or is replaced so preview
+ * audio and local monitor ducking can never outlive the player UI.
  */
 export class PreviewManager {
   private playerManager: PlayerManager;
   private audioCaptureManager: AudioCaptureManagerMain;
+  private watchedContents?: Electron.WebContents;
 
   constructor(
     playerManager: PlayerManager,
@@ -60,6 +55,7 @@ export class PreviewManager {
 
     this.audioCaptureManager.on("previewState", this._handlePreviewState);
 
+    ipcMain.on("PLAYER_REGISTER_VIEW", this._handleRegisterView);
     ipcMain.on("PLAYER_PREVIEW_LOAD", this._handleLoad);
     ipcMain.on("PLAYER_PREVIEW_PLAY", this._handlePlay);
     ipcMain.on("PLAYER_PREVIEW_PAUSE", this._handlePause);
@@ -68,11 +64,17 @@ export class PreviewManager {
     ipcMain.on("PLAYER_PREVIEW_SET_VOLUME", this._handleSetVolume);
     ipcMain.on("PLAYER_PREVIEW_SET_MUTED", this._handleSetMuted);
     ipcMain.on("PLAYER_PREVIEW_SET_DUCK", this._handleSetDuck);
+
+    if (this.playerManager.registeredViewId !== undefined) {
+      this._watchPlayerView(this.playerManager.registeredViewId);
+    }
   }
 
   destroy(): void {
+    this._unwatchPlayerView();
     this.audioCaptureManager.off("previewState", this._handlePreviewState);
 
+    ipcMain.off("PLAYER_REGISTER_VIEW", this._handleRegisterView);
     ipcMain.off("PLAYER_PREVIEW_LOAD", this._handleLoad);
     ipcMain.off("PLAYER_PREVIEW_PLAY", this._handlePlay);
     ipcMain.off("PLAYER_PREVIEW_PAUSE", this._handlePause);
@@ -82,6 +84,54 @@ export class PreviewManager {
     ipcMain.off("PLAYER_PREVIEW_SET_MUTED", this._handleSetMuted);
     ipcMain.off("PLAYER_PREVIEW_SET_DUCK", this._handleSetDuck);
   }
+
+  private _watchPlayerView(viewId: number): void {
+    this._unwatchPlayerView();
+    const contents = webContents.fromId(viewId);
+    if (!contents || contents.isDestroyed()) {
+      return;
+    }
+    this.watchedContents = contents;
+    contents.on("did-start-navigation", this._handlePlayerNavigation);
+    contents.on("render-process-gone", this._handlePlayerLifecycleStop);
+    contents.on("destroyed", this._handlePlayerDestroyed);
+  }
+
+  private _unwatchPlayerView(): void {
+    const contents = this.watchedContents;
+    this.watchedContents = undefined;
+    if (!contents || contents.isDestroyed()) {
+      return;
+    }
+    contents.off("did-start-navigation", this._handlePlayerNavigation);
+    contents.off("render-process-gone", this._handlePlayerLifecycleStop);
+    contents.off("destroyed", this._handlePlayerDestroyed);
+  }
+
+  private _handleRegisterView = (_: Electron.IpcMainEvent, viewId: number) => {
+    this.audioCaptureManager.previewStop();
+    this._watchPlayerView(viewId);
+  };
+
+  private _handlePlayerNavigation = (
+    _: Electron.Event,
+    __: string,
+    ___: boolean,
+    isMainFrame: boolean,
+  ) => {
+    if (isMainFrame) {
+      this.audioCaptureManager.previewStop();
+    }
+  };
+
+  private _handlePlayerLifecycleStop = () => {
+    this.audioCaptureManager.previewStop();
+  };
+
+  private _handlePlayerDestroyed = () => {
+    this.watchedContents = undefined;
+    this.audioCaptureManager.previewStop();
+  };
 
   private _isFromPlayer(event: Electron.IpcMainEvent): boolean {
     return (
@@ -108,7 +158,7 @@ export class PreviewManager {
         duration: 0,
         ended: false,
         level: 0,
-        error: "Unsupported preview audio source",
+        error: "Preview is only available for local audio files",
       });
       return;
     }

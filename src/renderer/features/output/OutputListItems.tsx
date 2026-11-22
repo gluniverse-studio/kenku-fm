@@ -49,6 +49,7 @@ export function OutputListItems() {
     // The capture graph starts at its own defaults so the stored monitor setup has to be sent
     window.kenku.setMonitorGain(output.monitorGain);
     window.kenku.setMonitorDevice(output.monitorDeviceId);
+    window.kenku.setPreviewDevice(output.previewDeviceId ?? "");
   }, []);
 
   useEffect(() => {

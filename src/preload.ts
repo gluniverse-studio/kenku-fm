@@ -178,6 +178,10 @@ const api = {
   setMonitorDevice: (deviceId: string) => {
     ipcRenderer.send("AUDIO_CAPTURE_SET_MONITOR_DEVICE", deviceId);
   },
+  /** Send GM-only previews to a dedicated device, or follow Monitor when empty */
+  setPreviewDevice: (deviceId: string) => {
+    ipcRenderer.send("AUDIO_CAPTURE_SET_PREVIEW_DEVICE", deviceId);
+  },
   startExternalAudioCapture: (deviceId: string) => {
     ipcRenderer.send("AUDIO_CAPTURE_START_EXTERNAL_AUDIO_CAPTURE", deviceId);
   },

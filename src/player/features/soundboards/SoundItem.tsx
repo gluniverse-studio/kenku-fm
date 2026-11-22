@@ -22,8 +22,10 @@ import Typography from "@mui/material/Typography";
 import useMediaQuery from "@mui/material/useMediaQuery";
 
 import { RootState } from "../../app/store";
+import { normalizedSource } from "../../common/mediaURL";
 import { Sound, Soundboard, editSound, removeSound } from "./soundboardsSlice";
 import { SoundSettings } from "./SoundSettings";
+import { isPreviewableUrl } from "../preview/previewHelpers";
 import {
   PREVIEW_ACCENT,
   PREVIEW_BORDER,
@@ -73,6 +75,7 @@ export function SoundItem({
   const previewPlaying = useSelector(
     (state: RootState) => isPreviewSound && state.preview.playing,
   );
+  const canPreview = isPreviewableUrl(normalizedSource(sound));
   const dispatch = useDispatch();
 
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -193,44 +196,53 @@ export function SoundItem({
               </Typography>
               <Tooltip
                 title={
-                  previewPlaying
-                    ? "Stop preview (only you hear this)"
-                    : "Preview (only you hear this)"
+                  !canPreview
+                    ? "Preview is only available for local audio files"
+                    : previewPlaying
+                      ? "Stop preview (only you hear this)"
+                      : "Preview (only you hear this)"
                 }
               >
-                <IconButton
-                  size="small"
-                  aria-label={
-                    previewPlaying
-                      ? `stop preview ${sound.title}`
-                      : `preview ${sound.title}`
-                  }
-                  onPointerDown={(e) => e.stopPropagation()}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onPreview(sound);
-                  }}
-                  sx={{
-                    color: isPreviewSound
-                      ? PREVIEW_ACCENT
-                      : "rgba(245, 183, 76, 0.75)",
-                    backgroundColor: isPreviewSound
-                      ? PREVIEW_TINT
-                      : "transparent",
-                    border: `1px solid ${
-                      isPreviewSound
-                        ? PREVIEW_BORDER
-                        : "rgba(245, 183, 76, 0.25)"
-                    }`,
-                    "&:hover": {
-                      color: PREVIEW_ACCENT,
-                      backgroundColor: PREVIEW_TINT_HOVER,
-                      borderColor: PREVIEW_BORDER,
-                    },
-                  }}
-                >
-                  <HeadphonesRounded fontSize="small" />
-                </IconButton>
+                <span>
+                  <IconButton
+                    size="small"
+                    disabled={!canPreview}
+                    aria-label={
+                      previewPlaying
+                        ? `stop preview ${sound.title}`
+                        : `preview ${sound.title}`
+                    }
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onPreview(sound);
+                    }}
+                    sx={{
+                      color: isPreviewSound
+                        ? PREVIEW_ACCENT
+                        : "rgba(245, 183, 76, 0.75)",
+                      backgroundColor: isPreviewSound
+                        ? PREVIEW_TINT
+                        : "transparent",
+                      border: `1px solid ${
+                        isPreviewSound
+                          ? PREVIEW_BORDER
+                          : "rgba(245, 183, 76, 0.25)"
+                      }`,
+                      "&:hover": {
+                        color: PREVIEW_ACCENT,
+                        backgroundColor: PREVIEW_TINT_HOVER,
+                        borderColor: PREVIEW_BORDER,
+                      },
+                    }}
+                  >
+                    {previewPlaying ? (
+                      <Stop fontSize="small" />
+                    ) : (
+                      <HeadphonesRounded fontSize="small" />
+                    )}
+                  </IconButton>
+                </span>
               </Tooltip>
               <IconButton onClick={handleMenuClick}>
                 <MoreVert />

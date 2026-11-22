@@ -7,7 +7,8 @@ const PROGRESS_INTERVAL_MS = 200;
 
 export interface PreviewAudioEngineCallbacks {
   onState: (state: PreviewEngineState) => void;
-  onPlayingChange: (playing: boolean) => void;
+  /** Fires whenever preview transitions between producing audible sound and being silent */
+  onPlayingChange: (audible: boolean) => void;
   onWarning?: (message: string) => void;
 }
 
@@ -36,13 +37,17 @@ function clampVolume(volume: number): number {
  * dedicated AudioContext inside this uncaptured window, preview samples never
  * enter the broadcast worklet (`_pcmStreamNode`) or the player's output buses.
  *
- * Output goes through a dedicated `<audio>` sink following the chosen monitor
- * device (`setSinkId`), completely independent of the live loopback element's
- * `muted` flag so previews remain audible even when "This Computer" is unticked.
+ * Only local library files served over `kenku-media://` are accepted so this
+ * unsandboxed capture window never fetches or decodes third-party remote URLs.
+ *
+ * Output goes through a dedicated `<audio>` sink (`_outputElement`) following
+ * the chosen preview/monitor device (`setSinkId`), completely independent of
+ * the live loopback element's `muted` flag so previews remain audible even
+ * when "This Computer" is unticked.
  */
 export class PreviewAudioEngine {
   private _callbacks: PreviewAudioEngineCallbacks;
-  /** Dedicated AudioContext for routable local preview files, isolated from the live mix */
+  /** Dedicated AudioContext for preview files, isolated from the live capture context */
   private _context?: AudioContext;
   private _gainNode?: GainNode;
   private _analyser?: AnalyserNode;
@@ -59,33 +64,30 @@ export class PreviewAudioEngine {
   private _requestId = 0;
   private _loading = false;
   private _ended = false;
-  private _volume = 0.8;
+  private _volume = 0.85;
   private _muted = false;
-  private _monitorDeviceId = "";
+  private _deviceId = "";
+  private _deviceSeq = 0;
   private _pendingSeek: number | null = null;
   private _progressTimer: ReturnType<typeof setInterval> | null = null;
-  private _lastReportedPlaying = false;
+  private _lastReportedAudible = false;
 
   constructor(callbacks: PreviewAudioEngineCallbacks) {
     this._callbacks = callbacks;
   }
 
-  /** Route preview playback to the chosen monitor device, or system default when empty */
+  /** Route preview playback to the chosen output device, or system default when empty */
   async setMonitorDevice(deviceId: string): Promise<void> {
-    this._monitorDeviceId = deviceId;
-    const targets: HTMLAudioElement[] = [];
-    if (this._outputElement) {
-      targets.push(this._outputElement);
+    this._deviceId = deviceId;
+    const seq = ++this._deviceSeq;
+    const target = this._routable ? this._outputElement : this._element;
+    if (!target) {
+      return;
     }
-    if (this._element && !this._routable) {
-      targets.push(this._element);
-    }
-    for (const target of targets) {
-      await this._applySinkId(target, deviceId);
-    }
+    await this._applySinkId(target, deviceId, seq);
   }
 
-  /** Load and start playing a preview track or sound */
+  /** Load and start playing a local preview track or sound */
   load(command: PreviewLoadCommand): void {
     this._teardownElement();
     this._requestId = command.requestId;
@@ -95,36 +97,36 @@ export class PreviewAudioEngine {
     this._ended = false;
     this._pendingSeek = null;
 
-    const routable = command.url.startsWith(MEDIA_SCHEME);
+    if (!command.url.startsWith(MEDIA_SCHEME)) {
+      this._loading = false;
+      this._updateAudible();
+      this._emitState("Preview is only available for local audio files");
+      return;
+    }
+
     const element = document.createElement("audio");
     element.preload = "auto";
     element.loop = false;
+    element.crossOrigin = "anonymous";
 
-    if (routable) {
-      element.crossOrigin = "anonymous";
-      const graphReady = this._ensurePreviewGraph();
-      if (graphReady && this._context && this._gainNode) {
-        try {
-          this._sourceNode = this._context.createMediaElementSource(element);
-          this._sourceNode.connect(this._gainNode);
-          this._routable = true;
-        } catch {
-          this._routable = false;
-        }
-      } else {
+    const graphReady = this._ensurePreviewGraph();
+    if (graphReady && this._context && this._gainNode) {
+      try {
+        this._sourceNode = this._context.createMediaElementSource(element);
+        this._sourceNode.connect(this._gainNode);
+        this._routable = true;
+      } catch {
         this._routable = false;
       }
     } else {
-      // Remote URLs may not send CORS headers; driving the element directly
-      // avoids Web Audio muting them silently while still following the monitor sink.
       this._routable = false;
     }
 
     this._element = element;
     this._applyVolume();
 
-    if (!this._routable && this._monitorDeviceId) {
-      void this._applySinkId(element, this._monitorDeviceId);
+    if (!this._routable && this._deviceId) {
+      void this._applySinkId(element, this._deviceId, this._deviceSeq);
     }
 
     element.addEventListener("loadedmetadata", this._handleLoadedMetadata);
@@ -137,6 +139,7 @@ export class PreviewAudioEngine {
 
     element.src = command.url;
     element.load();
+    this._updateAudible();
     this._emitState();
     this._startPlayback(element);
   }
@@ -181,11 +184,13 @@ export class PreviewAudioEngine {
   setVolume(volume: number): void {
     this._volume = clampVolume(volume);
     this._applyVolume();
+    this._updateAudible();
   }
 
   setMuted(muted: boolean): void {
     this._muted = Boolean(muted);
     this._applyVolume();
+    this._updateAudible();
   }
 
   stop(): void {
@@ -194,7 +199,7 @@ export class PreviewAudioEngine {
     this._loading = false;
     this._ended = false;
     this._pendingSeek = null;
-    this._setPlaying(false);
+    this._updateAudible();
     if (hadElement) {
       this._emitState();
     }
@@ -229,14 +234,19 @@ export class PreviewAudioEngine {
       playing: this._isPlaying(),
       sinkId:
         (activeOutput as (HTMLAudioElement & { sinkId?: string }) | undefined)
-          ?.sinkId ?? this._monitorDeviceId,
+          ?.sinkId ?? this._deviceId,
       outputMuted: activeOutput ? activeOutput.muted : false,
       peakLevel: this._measurePeakLevel(),
     };
   }
 
   private _ensurePreviewGraph(): boolean {
-    if (this._context && this._gainNode && this._destination && this._outputElement) {
+    if (
+      this._context &&
+      this._gainNode &&
+      this._destination &&
+      this._outputElement
+    ) {
       return true;
     }
     try {
@@ -269,8 +279,8 @@ export class PreviewAudioEngine {
       this._outputElement = outputElement;
       this._applyVolume();
 
-      if (this._monitorDeviceId) {
-        void this._applySinkId(outputElement, this._monitorDeviceId);
+      if (this._deviceId) {
+        void this._applySinkId(outputElement, this._deviceId, this._deviceSeq);
       }
       return true;
     } catch {
@@ -299,7 +309,7 @@ export class PreviewAudioEngine {
           return;
         }
         this._loading = false;
-        this._setPlaying(false);
+        this._updateAudible();
         this._emitState("Unable to play preview audio");
       });
     }
@@ -328,6 +338,7 @@ export class PreviewAudioEngine {
   private async _applySinkId(
     element: HTMLAudioElement,
     deviceId: string,
+    seq: number,
   ): Promise<void> {
     const sinkable = element as HTMLAudioElement & {
       setSinkId?: (id: string) => Promise<void>;
@@ -338,8 +349,11 @@ export class PreviewAudioEngine {
     try {
       await sinkable.setSinkId(deviceId);
     } catch (error) {
+      if (seq !== this._deviceSeq) {
+        return;
+      }
       this._callbacks.onWarning?.(
-        `Unable to send preview audio to the selected monitor device: ${
+        `Unable to send preview audio to the selected output device: ${
           (error as Error).message
         }`,
       );
@@ -396,12 +410,17 @@ export class PreviewAudioEngine {
     );
   }
 
-  private _setPlaying(playing: boolean): void {
-    if (playing === this._lastReportedPlaying) {
+  private _isAudible(): boolean {
+    return this._isPlaying() && !this._muted && this._volume > 0;
+  }
+
+  private _updateAudible(): void {
+    const audible = this._isAudible();
+    if (audible === this._lastReportedAudible) {
       return;
     }
-    this._lastReportedPlaying = playing;
-    this._callbacks.onPlayingChange(playing);
+    this._lastReportedAudible = audible;
+    this._callbacks.onPlayingChange(audible);
   }
 
   private _safeDuration(element?: HTMLAudioElement): number {
@@ -413,11 +432,8 @@ export class PreviewAudioEngine {
   }
 
   private _measurePeakLevel(): number {
-    if (!this._isPlaying()) {
+    if (!this._isAudible() || !this._routable || !this._analyser || !this._analyserData) {
       return 0;
-    }
-    if (!this._routable || !this._analyser || !this._analyserData) {
-      return this._muted ? 0 : this._volume;
     }
     this._analyser.getFloatTimeDomainData(this._analyserData);
     let peak = 0;
@@ -473,7 +489,7 @@ export class PreviewAudioEngine {
   private _handlePlay = (): void => {
     this._loading = false;
     this._ended = false;
-    this._setPlaying(true);
+    this._updateAudible();
     this._startProgressTimer();
     this._emitState();
   };
@@ -483,7 +499,7 @@ export class PreviewAudioEngine {
       return;
     }
     this._stopProgressTimer();
-    this._setPlaying(false);
+    this._updateAudible();
     this._emitState();
   };
 
@@ -491,7 +507,7 @@ export class PreviewAudioEngine {
     this._stopProgressTimer();
     this._loading = false;
     this._ended = true;
-    this._setPlaying(false);
+    this._updateAudible();
     if (this._element) {
       this._element.currentTime = 0;
     }
@@ -505,7 +521,7 @@ export class PreviewAudioEngine {
   private _handleError = (): void => {
     this._stopProgressTimer();
     this._loading = false;
-    this._setPlaying(false);
+    this._updateAudible();
     this._emitState("Unable to load preview audio");
   };
 }

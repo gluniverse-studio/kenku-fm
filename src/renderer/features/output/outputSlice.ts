@@ -23,6 +23,8 @@ export interface OutputState {
   monitorGain: number;
   /** An empty device id follows the system default output */
   monitorDeviceId: string;
+  /** Optional dedicated output device for GM-only previews; empty follows Monitor */
+  previewDeviceId: string;
 }
 
 const initialState: OutputState = {
@@ -31,6 +33,7 @@ const initialState: OutputState = {
   monitorDevices: [],
   monitorGain: 1,
   monitorDeviceId: "",
+  previewDeviceId: "",
 };
 
 export const outputSlice = createSlice({
@@ -63,6 +66,9 @@ export const outputSlice = createSlice({
     setMonitorDeviceId: (state, action: PayloadAction<string>) => {
       state.monitorDeviceId = action.payload;
     },
+    setPreviewDeviceId: (state, action: PayloadAction<string>) => {
+      state.previewDeviceId = action.payload;
+    },
   },
 });
 
@@ -74,6 +80,7 @@ export const {
   setMonitorDevices,
   setMonitorGain,
   setMonitorDeviceId,
+  setPreviewDeviceId,
 } = outputSlice.actions;
 
 export default outputSlice.reducer;
