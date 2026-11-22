@@ -8,6 +8,7 @@ import {
 import { TypedEmitter } from "tiny-typed-emitter";
 import { Readable } from "stream";
 import prism from "prism-media";
+import { PreviewEngineState, PreviewLoadCommand } from "../../types/preview";
 
 declare const AUDIO_CAPTURE_WINDOW_WEBPACK_ENTRY: string;
 declare const AUDIO_CAPTURE_WINDOW_PRELOAD_WEBPACK_ENTRY: string;
@@ -47,6 +48,7 @@ interface AudioCaptureManagerEvents {
   encoderInfo: (info: EncoderInfo) => void;
   levels: (levels: AudioLevels) => void;
   warning: (message: string) => void;
+  previewState: (state: PreviewEngineState) => void;
 }
 
 /**
@@ -200,6 +202,13 @@ export class AudioCaptureManagerMain extends TypedEmitter<AudioCaptureManagerEve
    * to a window that has been reloaded along with the streaming mode
    */
   _normalize = false;
+  /** Monitor and preview preferences cached so a reloaded capture window restores them */
+  _loopback = true;
+  _monitorGain = 1;
+  _monitorDeviceId = "";
+  _previewDeviceId = "";
+  _duckLiveMonitor = true;
+  _activePreviewRequestId = 0;
   /**
    * Whether audio that could not be read off the port has been reported
    * A message the capture window sends in a shape this process can't
@@ -251,6 +260,10 @@ export class AudioCaptureManagerMain extends TypedEmitter<AudioCaptureManagerEve
       this._handleSetMonitorDevice
     );
     ipcMain.on(
+      "AUDIO_CAPTURE_SET_PREVIEW_DEVICE",
+      this._handleSetPreviewDevice
+    );
+    ipcMain.on(
       "AUDIO_CAPTURE_START_EXTERNAL_AUDIO_CAPTURE",
       this._handleStartExternalAudioCapture
     );
@@ -263,6 +276,7 @@ export class AudioCaptureManagerMain extends TypedEmitter<AudioCaptureManagerEve
     ipcMain.on("AUDIO_CAPTURE_STREAM_ERROR", this._handleStreamError);
     ipcMain.on("AUDIO_CAPTURE_LEVELS", this._handleLevels);
     ipcMain.on("AUDIO_CAPTURE_WARNING", this._handleWarning);
+    ipcMain.on("AUDIO_CAPTURE_PREVIEW_STATE", this._handlePreviewState);
     ipcMain.on("AUDIO_CAPTURE_REQUEST_PORT", this._handleRequestPort);
     ipcMain.on(
       "AUDIO_CAPTURE_START_BROWSER_VIEW_STREAM",
@@ -291,6 +305,10 @@ export class AudioCaptureManagerMain extends TypedEmitter<AudioCaptureManagerEve
       this._handleSetMonitorDevice
     );
     ipcMain.off(
+      "AUDIO_CAPTURE_SET_PREVIEW_DEVICE",
+      this._handleSetPreviewDevice
+    );
+    ipcMain.off(
       "AUDIO_CAPTURE_START_EXTERNAL_AUDIO_CAPTURE",
       this._handleStartExternalAudioCapture
     );
@@ -303,6 +321,7 @@ export class AudioCaptureManagerMain extends TypedEmitter<AudioCaptureManagerEve
     ipcMain.off("AUDIO_CAPTURE_STREAM_ERROR", this._handleStreamError);
     ipcMain.off("AUDIO_CAPTURE_LEVELS", this._handleLevels);
     ipcMain.off("AUDIO_CAPTURE_WARNING", this._handleWarning);
+    ipcMain.off("AUDIO_CAPTURE_PREVIEW_STATE", this._handlePreviewState);
     ipcMain.off("AUDIO_CAPTURE_REQUEST_PORT", this._handleRequestPort);
     ipcMain.off(
       "AUDIO_CAPTURE_START_BROWSER_VIEW_STREAM",
@@ -533,6 +552,41 @@ export class AudioCaptureManagerMain extends TypedEmitter<AudioCaptureManagerEve
    * The window ignores this if it is already capturing
    */
   _handleCaptureWindowLoad = () => {
+    this._browserWindow.webContents.send(
+      "AUDIO_CAPTURE_SET_LOOPBACK",
+      this._loopback
+    );
+    this._browserWindow.webContents.send(
+      "AUDIO_CAPTURE_SET_MONITOR_GAIN",
+      this._monitorGain
+    );
+    this._browserWindow.webContents.send(
+      "AUDIO_CAPTURE_SET_MONITOR_DEVICE",
+      this._monitorDeviceId
+    );
+    this._browserWindow.webContents.send(
+      "AUDIO_CAPTURE_SET_PREVIEW_DEVICE",
+      this._previewDeviceId
+    );
+    this._browserWindow.webContents.send(
+      "AUDIO_CAPTURE_PREVIEW_SET_DUCK",
+      this._duckLiveMonitor
+    );
+    if (this._activePreviewRequestId > 0) {
+      // A reload tears down the preview element, so report an interruption so
+      // the player closes the deck instead of leaving inert controls open
+      this.emit("previewState", {
+        requestId: this._activePreviewRequestId,
+        loading: false,
+        playing: false,
+        progress: 0,
+        duration: 0,
+        ended: false,
+        level: 0,
+        error: "Preview was interrupted",
+      });
+      this._activePreviewRequestId = 0;
+    }
     if (this._streamingMode === undefined) {
       return;
     }
@@ -575,6 +629,7 @@ export class AudioCaptureManagerMain extends TypedEmitter<AudioCaptureManagerEve
   };
 
   _handleSetLoopback = (_: Electron.IpcMainEvent, loopback: boolean) => {
+    this._loopback = loopback;
     this._browserWindow.webContents.send("AUDIO_CAPTURE_SET_LOOPBACK", loopback);
   };
 
@@ -615,6 +670,7 @@ export class AudioCaptureManagerMain extends TypedEmitter<AudioCaptureManagerEve
   };
 
   _handleSetMonitorGain = (_: Electron.IpcMainEvent, gain: number) => {
+    this._monitorGain = gain;
     this._browserWindow.webContents.send(
       "AUDIO_CAPTURE_SET_MONITOR_GAIN",
       gain
@@ -630,8 +686,17 @@ export class AudioCaptureManagerMain extends TypedEmitter<AudioCaptureManagerEve
   };
 
   _handleSetMonitorDevice = (_: Electron.IpcMainEvent, deviceId: string) => {
+    this._monitorDeviceId = deviceId;
     this._browserWindow.webContents.send(
       "AUDIO_CAPTURE_SET_MONITOR_DEVICE",
+      deviceId
+    );
+  };
+
+  _handleSetPreviewDevice = (_: Electron.IpcMainEvent, deviceId: string) => {
+    this._previewDeviceId = deviceId;
+    this._browserWindow.webContents.send(
+      "AUDIO_CAPTURE_SET_PREVIEW_DEVICE",
       deviceId
     );
   };
@@ -663,6 +728,59 @@ export class AudioCaptureManagerMain extends TypedEmitter<AudioCaptureManagerEve
   _handleWarning = (_: Electron.IpcMainEvent, message: string) => {
     this.emit("warning", message);
   };
+
+  _handlePreviewState = (
+    event: Electron.IpcMainEvent,
+    state: PreviewEngineState
+  ) => {
+    if (event.sender !== this._browserWindow.webContents) {
+      return;
+    }
+    this.emit("previewState", state);
+  };
+
+  _sendToCaptureWindow(channel: string, ...args: unknown[]): void {
+    if (this._browserWindow.isDestroyed()) {
+      return;
+    }
+    this._browserWindow.webContents.send(channel, ...args);
+  }
+
+  previewLoad(command: PreviewLoadCommand): void {
+    this._activePreviewRequestId = command.requestId;
+    this._duckLiveMonitor = command.duckLiveMonitor;
+    this._sendToCaptureWindow("AUDIO_CAPTURE_PREVIEW_LOAD", command);
+  }
+
+  previewPlay(): void {
+    this._sendToCaptureWindow("AUDIO_CAPTURE_PREVIEW_PLAY");
+  }
+
+  previewPause(): void {
+    this._sendToCaptureWindow("AUDIO_CAPTURE_PREVIEW_PAUSE");
+  }
+
+  previewStop(): void {
+    this._activePreviewRequestId = 0;
+    this._sendToCaptureWindow("AUDIO_CAPTURE_PREVIEW_STOP");
+  }
+
+  previewSeek(to: number): void {
+    this._sendToCaptureWindow("AUDIO_CAPTURE_PREVIEW_SEEK", to);
+  }
+
+  previewSetVolume(volume: number): void {
+    this._sendToCaptureWindow("AUDIO_CAPTURE_PREVIEW_SET_VOLUME", volume);
+  }
+
+  previewSetMuted(muted: boolean): void {
+    this._sendToCaptureWindow("AUDIO_CAPTURE_PREVIEW_SET_MUTED", muted);
+  }
+
+  previewSetDuck(enabled: boolean): void {
+    this._duckLiveMonitor = enabled;
+    this._sendToCaptureWindow("AUDIO_CAPTURE_PREVIEW_SET_DUCK", enabled);
+  }
 
   _handleStreamStart = (
     _: Electron.IpcMainEvent,

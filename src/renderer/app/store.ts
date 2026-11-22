@@ -33,7 +33,7 @@ const persistedOutputReducer = persistReducer(
     key: "output",
     version: 1,
     storage,
-    whitelist: ["monitorGain", "monitorDeviceId"],
+    whitelist: ["monitorGain", "monitorDeviceId", "previewDeviceId"],
   },
   outputReducer,
 );

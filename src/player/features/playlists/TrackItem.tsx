@@ -4,8 +4,12 @@ import ListItemButton from "@mui/material/ListItemButton";
 import ListItemText from "@mui/material/ListItemText";
 import PlayArrow from "@mui/icons-material/PlayArrowRounded";
 import Pause from "@mui/icons-material/PauseRounded";
+import StopRounded from "@mui/icons-material/StopRounded";
+import HeadphonesRounded from "@mui/icons-material/HeadphonesRounded";
 import IconButton from "@mui/material/IconButton";
 import Paper from "@mui/material/Paper";
+import Tooltip from "@mui/material/Tooltip";
+import Divider from "@mui/material/Divider";
 
 import MoreVert from "@mui/icons-material/MoreVertRounded";
 import Menu from "@mui/material/Menu";
@@ -15,6 +19,7 @@ import { Track, removeTrack, Playlist } from "./playlistsSlice";
 import { useDispatch, useSelector } from "react-redux";
 import { TrackSettings } from "./TrackSettings";
 import { RootState } from "../../app/store";
+import { normalizedSource } from "../../common/mediaURL";
 import {
   playPause,
   removeTrackFromQueue,
@@ -22,20 +27,42 @@ import {
   stopTrack,
   updatePlayback,
 } from "./playlistPlaybackSlice";
+import { isPreviewableUrl } from "../preview/previewHelpers";
+import {
+  PREVIEW_ACCENT,
+  PREVIEW_BORDER,
+  PREVIEW_TINT,
+  PREVIEW_TINT_HOVER,
+} from "../preview/previewTheme";
 
 type TrackItemProps = {
   track: Track;
   playlist: Playlist;
   onPlay: (id: string) => void;
+  onPreview: (id: string) => void;
 };
 
-export function TrackItem({ track, playlist, onPlay }: TrackItemProps) {
+export function TrackItem({
+  track,
+  playlist,
+  onPlay,
+  onPreview,
+}: TrackItemProps) {
   const isCurrentTrack = useSelector(
     (state: RootState) => state.playlistPlayback.track?.id === track.id,
   );
   const playing = useSelector(
     (state: RootState) => state.playlistPlayback.playing && isCurrentTrack,
   );
+  const isPreviewTrack = useSelector(
+    (state: RootState) =>
+      state.preview.item?.kind === "track" &&
+      state.preview.item.id === track.id,
+  );
+  const previewPlaying = useSelector(
+    (state: RootState) => isPreviewTrack && state.preview.playing,
+  );
+  const canPreview = isPreviewableUrl(normalizedSource(track));
   const dispatch = useDispatch();
 
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -80,6 +107,11 @@ export function TrackItem({ track, playlist, onPlay }: TrackItemProps) {
     }
   }
 
+  function handlePreview(event: React.MouseEvent<HTMLButtonElement>) {
+    event.stopPropagation();
+    onPreview(track.id);
+  }
+
   return (
     <ListItem key={track.id} disablePadding>
       <Paper
@@ -88,6 +120,9 @@ export function TrackItem({ track, playlist, onPlay }: TrackItemProps) {
           width: "100%",
           m: 0.5,
           backgroundColor: "rgba(34, 38, 57, 0.8)",
+          ...(isPreviewTrack && {
+            boxShadow: `inset 3px 0 0 ${PREVIEW_ACCENT}`,
+          }),
         }}
       >
         <ListItemButton
@@ -110,12 +145,63 @@ export function TrackItem({ track, playlist, onPlay }: TrackItemProps) {
               typography: "body1",
             }}
           />
-          <IconButton
-            aria-label={playing ? "pause" : "play"}
-            onClick={handlePlayPause}
+          <Tooltip
+            title={
+              !canPreview
+                ? "Preview is only available for local audio files"
+                : previewPlaying
+                  ? "Stop preview (only you hear this)"
+                  : "Preview (only you hear this)"
+            }
           >
-            {playing ? <Pause /> : <PlayArrow />}
-          </IconButton>
+            <span>
+              <IconButton
+                aria-label={
+                  previewPlaying
+                    ? `stop preview ${track.title}`
+                    : `preview ${track.title}`
+                }
+                size="small"
+                disabled={!canPreview}
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={handlePreview}
+                sx={{
+                  mr: 0.5,
+                  color: isPreviewTrack
+                    ? PREVIEW_ACCENT
+                    : "rgba(245, 183, 76, 0.75)",
+                  backgroundColor: isPreviewTrack ? PREVIEW_TINT : "transparent",
+                  border: `1px solid ${
+                    isPreviewTrack ? PREVIEW_BORDER : "rgba(245, 183, 76, 0.25)"
+                  }`,
+                  "&:hover": {
+                    color: PREVIEW_ACCENT,
+                    backgroundColor: PREVIEW_TINT_HOVER,
+                    borderColor: PREVIEW_BORDER,
+                  },
+                }}
+              >
+                {previewPlaying ? (
+                  <StopRounded fontSize="small" />
+                ) : (
+                  <HeadphonesRounded fontSize="small" />
+                )}
+              </IconButton>
+            </span>
+          </Tooltip>
+          <Divider
+            orientation="vertical"
+            flexItem
+            sx={{ mx: 0.5, my: 1, opacity: 0.2 }}
+          />
+          <Tooltip title={playing ? "Pause live" : "Play live (table hears this)"}>
+            <IconButton
+              aria-label={playing ? "pause" : "play"}
+              onClick={handlePlayPause}
+            >
+              {playing ? <Pause /> : <PlayArrow />}
+            </IconButton>
+          </Tooltip>
           <IconButton onClick={handleMenuClick}>
             <MoreVert />
           </IconButton>

@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
 
+import HeadphonesRounded from "@mui/icons-material/HeadphonesRounded";
 import MoreVert from "@mui/icons-material/MoreVertRounded";
 import PlayArrow from "@mui/icons-material/PlayArrowRounded";
 import Loop from "@mui/icons-material/RepeatRounded";
@@ -16,18 +17,28 @@ import MenuItem from "@mui/material/MenuItem";
 import Slider from "@mui/material/Slider";
 import Stack from "@mui/material/Stack";
 import styled from "@mui/material/styles/styled";
+import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import useMediaQuery from "@mui/material/useMediaQuery";
 
 import { RootState } from "../../app/store";
+import { normalizedSource } from "../../common/mediaURL";
 import { Sound, Soundboard, editSound, removeSound } from "./soundboardsSlice";
 import { SoundSettings } from "./SoundSettings";
+import { isPreviewableUrl } from "../preview/previewHelpers";
+import {
+  PREVIEW_ACCENT,
+  PREVIEW_BORDER,
+  PREVIEW_TINT,
+  PREVIEW_TINT_HOVER,
+} from "../preview/previewTheme";
 
 type SoundItemProps = {
   id: string;
   soundboard: Soundboard;
   onPlay: (sound: Sound) => void;
   onStop: (id: string) => void;
+  onPreview: (sound: Sound) => void;
 };
 
 const VolumeSlider = styled(Slider)({
@@ -45,11 +56,26 @@ const VolumeSlider = styled(Slider)({
   },
 });
 
-export function SoundItem({ id, soundboard, onPlay, onStop }: SoundItemProps) {
+export function SoundItem({
+  id,
+  soundboard,
+  onPlay,
+  onStop,
+  onPreview,
+}: SoundItemProps) {
   const sound = useSelector((state: RootState) => state.soundboards.sounds[id]);
   const playing = useSelector(
     (state: RootState) => sound.id in state.soundboardPlayback.playback,
   );
+  const isPreviewSound = useSelector(
+    (state: RootState) =>
+      state.preview.item?.kind === "sound" &&
+      state.preview.item.id === sound.id,
+  );
+  const previewPlaying = useSelector(
+    (state: RootState) => isPreviewSound && state.preview.playing,
+  );
+  const canPreview = isPreviewableUrl(normalizedSource(sound));
   const dispatch = useDispatch();
 
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -126,17 +152,19 @@ export function SoundItem({ id, soundboard, onPlay, onStop }: SoundItemProps) {
   );
 
   const playButton = (
-    <IconButton
-      aria-label={playing ? "stop" : "play"}
-      onClick={handlePlayStop}
-      sx={{ padding: 0 }}
-    >
-      {playing ? (
-        <Stop sx={{ fontSize: "2.5rem" }} />
-      ) : (
-        <PlayArrow sx={{ fontSize: "2.5rem" }} />
-      )}
-    </IconButton>
+    <Tooltip title={playing ? "Stop live sound" : "Play live (table hears this)"}>
+      <IconButton
+        aria-label={playing ? "stop" : "play"}
+        onClick={handlePlayStop}
+        sx={{ padding: 0 }}
+      >
+        {playing ? (
+          <Stop sx={{ fontSize: "2.5rem" }} />
+        ) : (
+          <PlayArrow sx={{ fontSize: "2.5rem" }} />
+        )}
+      </IconButton>
+    </Tooltip>
   );
 
   return (
@@ -147,6 +175,9 @@ export function SoundItem({ id, soundboard, onPlay, onStop }: SoundItemProps) {
           flexDirection: "column",
           backgroundColor: "rgba(34, 38, 57, 0.8)",
           position: "relative",
+          ...(isPreviewSound && {
+            boxShadow: `inset 0 3px 0 ${PREVIEW_ACCENT}`,
+          }),
         }}
       >
         <CardActionArea
@@ -154,10 +185,65 @@ export function SoundItem({ id, soundboard, onPlay, onStop }: SoundItemProps) {
         />
         <CardContent sx={{ py: 2, ":last-child": { pb: 2 } }}>
           <Stack direction="column" gap={0.5} justifyContent="space-between">
-            <Stack direction="row" justifyContent="space-between">
+            <Stack
+              direction="row"
+              justifyContent="space-between"
+              alignItems="center"
+              spacing={0.5}
+            >
               <Typography variant="h6" noWrap sx={{ flexGrow: 1 }}>
                 {sound.title}
               </Typography>
+              <Tooltip
+                title={
+                  !canPreview
+                    ? "Preview is only available for local audio files"
+                    : previewPlaying
+                      ? "Stop preview (only you hear this)"
+                      : "Preview (only you hear this)"
+                }
+              >
+                <span>
+                  <IconButton
+                    size="small"
+                    disabled={!canPreview}
+                    aria-label={
+                      previewPlaying
+                        ? `stop preview ${sound.title}`
+                        : `preview ${sound.title}`
+                    }
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onPreview(sound);
+                    }}
+                    sx={{
+                      color: isPreviewSound
+                        ? PREVIEW_ACCENT
+                        : "rgba(245, 183, 76, 0.75)",
+                      backgroundColor: isPreviewSound
+                        ? PREVIEW_TINT
+                        : "transparent",
+                      border: `1px solid ${
+                        isPreviewSound
+                          ? PREVIEW_BORDER
+                          : "rgba(245, 183, 76, 0.25)"
+                      }`,
+                      "&:hover": {
+                        color: PREVIEW_ACCENT,
+                        backgroundColor: PREVIEW_TINT_HOVER,
+                        borderColor: PREVIEW_BORDER,
+                      },
+                    }}
+                  >
+                    {previewPlaying ? (
+                      <Stop fontSize="small" />
+                    ) : (
+                      <HeadphonesRounded fontSize="small" />
+                    )}
+                  </IconButton>
+                </span>
+              </Tooltip>
               <IconButton onClick={handleMenuClick}>
                 <MoreVert />
               </IconButton>
